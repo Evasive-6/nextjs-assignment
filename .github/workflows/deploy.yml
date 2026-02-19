@@ -1,0 +1,97 @@
+name: Multi-Environment Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - staging
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [development, staging, production]
+    environment: ${{ matrix.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Load secrets from GitHub Secrets
+      - name: Create environment file for ${{ matrix.environment }}
+        env:
+          # Public variables can be hardcoded
+          NEXT_PUBLIC_API_URL: ${{ secrets[format('API_URL_{0}', matrix.environment)] }}
+          NEXT_PUBLIC_ENVIRONMENT: ${{ matrix.environment }}
+          NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${{ secrets[format('STRIPE_PUBLISHABLE_KEY_{0}', matrix.environment)] }}
+          
+          # Private secrets from GitHub Secrets
+          DATABASE_URL: ${{ secrets[format('DATABASE_URL_{0}', matrix.environment)] }}
+          STRIPE_SECRET_KEY: ${{ secrets[format('STRIPE_SECRET_KEY_{0}', matrix.environment)] }}
+          JWT_SECRET: ${{ secrets[format('JWT_SECRET_{0}', matrix.environment)] }}
+        run: |
+          cat > .env.${{ matrix.environment }} << EOF
+          NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+          NEXT_PUBLIC_ENVIRONMENT=$NEXT_PUBLIC_ENVIRONMENT
+          NEXT_PUBLIC_LOG_LEVEL=${{ matrix.environment == 'production' && 'error' || 'info' }}
+          NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=$NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY
+          DATABASE_URL=$DATABASE_URL
+          STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY
+          JWT_SECRET=$JWT_SECRET
+          EOF
+
+      - name: Build for ${{ matrix.environment }}
+        run: npm run build:${{ matrix.environment }}
+        env:
+          NODE_ENV: ${{ matrix.environment }}
+          NEXT_PUBLIC_API_URL: ${{ secrets[format('API_URL_{0}', matrix.environment)] }}
+          DATABASE_URL: ${{ secrets[format('DATABASE_URL_{0}', matrix.environment)] }}
+          STRIPE_SECRET_KEY: ${{ secrets[format('STRIPE_SECRET_KEY_{0}', matrix.environment)] }}
+          JWT_SECRET: ${{ secrets[format('JWT_SECRET_{0}', matrix.environment)] }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: nextjs-build-${{ matrix.environment }}
+          path: .next
+          retention-days: 7
+
+      # Deploy steps would go here
+      # - name: Deploy to AWS/Azure
+      #   run: |
+      #     # Deployment script for ${{ matrix.environment }}
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for exposed secrets
+        run: |
+          # Scan for common patterns of exposed secrets
+          if grep -r "sk_live\|pk_live\|-----BEGIN PRIVATE KEY-----" . --exclude-dir=node_modules --exclude-dir=.git; then
+            echo "⚠️ WARNING: Potential secrets found in code!"
+            exit 1
+          fi
+          echo "✓ No hardcoded secrets detected"
+
+      - name: Verify .gitignore
+        run: |
+          if ! grep -q "\.env\.local" .gitignore; then
+            echo "WARNING: .env.local not in .gitignore"
+          fi
+          if ! grep -q "\.env\." .gitignore; then
+            echo "WARNING: .env.* files not properly ignored"
+          fi
